@@ -1,0 +1,136 @@
+{
+  "meta": {
+    "base_model": "Qwen/Qwen3-0.6B",
+    "torch": "2.14.0+cu130",
+    "gpu": "NVIDIA GeForce RTX 5090 D",
+    "samples_per_domain": 150,
+    "group_bounds": [
+      [
+        0,
+        8
+      ],
+      [
+        8,
+        16
+      ],
+      [
+        16,
+        32
+      ]
+    ],
+    "note": "语料无 train/val 切分，本报告为 in-distribution 指标"
+  },
+  "baseline": {
+    "ppl": {
+      "Code": 3.9609,
+      "Math": 4.4482,
+      "Arts": 16.9265
+    },
+    "ppl_tokens": {
+      "Code": 13778,
+      "Math": 18756,
+      "Arts": 22730
+    },
+    "samples_with_zero_loss": 0,
+    "sampled": 450
+  },
+  "dual_train": {
+    "ppl": {
+      "Code": 1.8658,
+      "Math": 1.6447,
+      "Arts": 10.3543
+    },
+    "ppl_tokens": {
+      "Code": 13778,
+      "Math": 18756,
+      "Arts": 22730
+    },
+    "samples_with_zero_loss": 0,
+    "sampled": 450,
+    "expert_health": {
+      "experts_with_nonzero_weight": 896,
+      "experts_never_called": 0,
+      "total_experts": 896,
+      "per_layer_never_called": 0,
+      "layers_with_fully_dead_expert": 0,
+      "min_pair_weight_share": 2e-08
+    },
+    "routing_sci_share": [
+      0.5169,
+      0.5422,
+      0.5514,
+      0.5705,
+      0.5669,
+      0.562,
+      0.5636,
+      0.5633,
+      0.5636,
+      0.5604,
+      0.5617,
+      0.5594,
+      0.5615,
+      0.5596,
+      0.5607,
+      0.5634,
+      0.5647,
+      0.5654,
+      0.568,
+      0.5657,
+      0.5641,
+      0.5651,
+      0.5666,
+      0.5676,
+      0.5666,
+      0.5662,
+      0.5678,
+      0.5673
+    ]
+  },
+  "jitter": {
+    "runs": 20,
+    "max_abs_diff": 0.0,
+    "bitwise_identical": true
+  },
+  "in_domain_routing": {
+    "0": {
+      "Code": 0.8011,
+      "Math": 0.6968,
+      "Arts": 0.2095
+    },
+    "8": {
+      "Code": 0.9019,
+      "Math": 0.9601,
+      "Arts": 0.0499
+    },
+    "16": {
+      "Code": 0.9142,
+      "Math": 0.9667,
+      "Arts": 0.0397
+    },
+    "27": {
+      "Code": 0.9396,
+      "Math": 0.9717,
+      "Arts": 0.0279
+    }
+  },
+  "dual_infer": {
+    "ppl": {
+      "Code": 1.957,
+      "Math": 1.7447,
+      "Arts": 11.5222
+    },
+    "ppl_tokens": {
+      "Code": 13778,
+      "Math": 18756,
+      "Arts": 22730
+    },
+    "samples_with_zero_loss": 0,
+    "sampled": 450
+  },
+  "impl_equivalence": {
+    "batch": 8,
+    "max_abs_diff": 20.7265625,
+    "mean_abs_diff": 0.9686594605445862,
+    "rel_max": 0.6328721642494202
+  }
+}
