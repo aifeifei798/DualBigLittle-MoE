@@ -1,4 +1,7 @@
-torch
-transformers
-accelerate
-datasets
+# 锁定版本：本项目在以下组合上实测（RTX 5090 D / CUDA 13.0）
+# 评估与数字复现依赖完全一致的版本，请勿随意升级
+torch==2.14.0
+transformers==5.17.0
+accelerate>=1.0
+datasets>=4.0
+numpy>=2.0

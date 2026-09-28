@@ -1,6 +1,11 @@
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
+.ruff_cache/
 
-# 训练产物（由 train_dual_big_resurrect.py 生成）
+# 训练与评估产物
 dual_big_resurrect_weights.pt
+checkpoints/
+reports/*.json
+reports/*.jsonl
