@@ -1,5 +1,9 @@
 import json
+
 from datasets import load_dataset
+
+# 专家分组：[0:8] 代码, [8:16] 数学, [16:32] 写作
+DOMAIN_GROUP = {"Code": 0, "Math": 1, "Arts": 2}
 
 print("=" * 70)
 print("[*] 正在装配【文理 1:1 对抗特训语料库】(4000理科 vs 4000文科)...")
@@ -20,35 +24,35 @@ ds_arts = load_dataset("HuggingFaceH4/no_robots", split="train[:4000]")
 
 dual_data = []
 
-# 理科 - 代码 (Big Target = 1: 理科核, Little Target = 0: 代码班长)
+# 理科 - 代码 (Big Target = 1: 理科核, Little Group = 0: 代码专家组 0-7)
 for item in ds_code:
     prompt = item["instruction"] + (f"\n{item['input']}"
                                     if item.get("input") else "")
     dual_data.append({
         "big_target": 1,
-        "little_target": 0,
+        "little_group": DOMAIN_GROUP["Code"],
         "domain": "Code",
         "prompt": prompt,
         "response": item["output"]
     })
 
-# 理科 - 数学 (Big Target = 1: 理科核, Little Target = 8: 数学班长)
+# 理科 - 数学 (Big Target = 1: 理科核, Little Group = 1: 数学专家组 8-15)
 for item in ds_math:
     dual_data.append({
         "big_target": 1,
-        "little_target": 8,
+        "little_group": DOMAIN_GROUP["Math"],
         "domain": "Math",
         "prompt": item["question"],
         "response": item["answer"]
     })
 
-# 文科 - 写作/日常 (Big Target = 0: 文科核, Little Target = 16: 文科班长)
+# 文科 - 写作/日常 (Big Target = 0: 文科核, Little Group = 2: 写作专家组 16-31)
 for item in ds_arts:
     messages = item["messages"]
     if len(messages) >= 2:
         dual_data.append({
             "big_target": 0,
-            "little_target": 16,
+            "little_group": DOMAIN_GROUP["Arts"],
             "domain": "Arts",
             "prompt": messages[0]["content"],
             "response": messages[1]["content"]

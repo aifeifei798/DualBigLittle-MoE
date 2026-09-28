@@ -1,46 +1,66 @@
 from collections import Counter
 import copy
 import os
-from threading import Thread
 import time
+from threading import Thread
+
 import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
+# ----------------------------------------------------------------------
+# 0. 全局超参（必须与 train_dual_big_resurrect.py 保持一致）
+# ----------------------------------------------------------------------
+MODEL_ID = "Qwen/Qwen3-0.6B"
+TOP_K = 8
+GAMMA = 0.3
+LORA_RANK = 16
+LORA_ALPHA = 16.0
+NUM_EXPERTS = 32
+NUM_STAGING_BUFFERS = 2  # 双缓冲：拷贝与计算真正重叠
+
+# 遥测分组，必须与 train_dual_big_resurrect.py 的 GROUP_BOUNDS 一致
+GROUP_BOUNDS = [(0, 8), (8, 16), (16, 32)]
+GROUP_LABELS = ["💻 代码", "🧮 数学", "✍️  写作"]
+
 
 # ----------------------------------------------------------------------
-# 1. 结构与推理封装
+# 1. 推理封装：主机 pinned RAM 专家池 + 真正的双缓冲 DMA 流式加载
 # ----------------------------------------------------------------------
-class LoRAMicroExpert(nn.Module):
-
-    def __init__(self,
-                 hidden_dim: int,
-                 rank: int = 16,
-                 lora_alpha: float = 16.0,
-                 dtype=torch.bfloat16):
-        super().__init__()
-        self.scaling = lora_alpha / rank
-        self.lora_A = nn.Linear(hidden_dim, rank, bias=False, dtype=dtype)
-        self.lora_B = nn.Linear(rank, hidden_dim, bias=False, dtype=dtype)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.lora_B(self.lora_A(x)) * self.scaling
-
-
 class DualBigResurrectInferenceWrapper(nn.Module):
+    """Tier-1/Tier-2 常驻显存，Tier-3 微专家留在 pinned 主机内存按需流式搬运。
+
+    关键点
+    ------
+    * staging buffer 是**常驻**的（不走 caching allocator），因此不存在
+      "在 transfer_stream 上分配、在 default stream 上使用、随即被回收"
+      的竞态（也就不需要 record_stream）。
+    * top-k 个专家的 H2D 拷贝一次性全部发到 transfer_stream，**发完再等**，
+      配合双缓冲与上一拍的完成事件，拷贝和计算真正重叠。
+    * 遥测统计全部留在 GPU 上累加，每层每 token 只做 **1 次** D2H 同步
+      （且那次同步本来就是拿专家下标给主机内存用，顺路把权重带回来）。
+    """
 
     def __init__(self,
-                 original_mlp: nn.Module,
-                 hidden_dim: int,
-                 rank: int = 16,
-                 num_experts: int = 32,
-                 top_k: int = 8,
-                 device: str = "cuda:0",
-                 dtype=torch.bfloat16):
+                 original_mlp,
+                 hidden_dim,
+                 rank=LORA_RANK,
+                 lora_alpha=LORA_ALPHA,
+                 num_experts=NUM_EXPERTS,
+                 top_k=TOP_K,
+                 gamma=GAMMA,
+                 device="cuda:0",
+                 dtype=torch.bfloat16,
+                 num_staging_buffers=NUM_STAGING_BUFFERS):
         super().__init__()
+        self.hidden_dim = hidden_dim
+        self.rank = rank
+        self.num_experts = num_experts
+        self.top_k = min(top_k, num_experts)
+        self.gamma = gamma
+        self.scaling = lora_alpha / rank
         self.device = device
         self.dtype = dtype
-        self.top_k = top_k
 
         self.big_arts = original_mlp.to(device)
         self.big_sci = copy.deepcopy(original_mlp).to(device)
@@ -56,84 +76,151 @@ class DualBigResurrectInferenceWrapper(nn.Module):
                                        device=device,
                                        dtype=dtype)
 
-        self.lora_pool_cpu = nn.ModuleList([
-            LoRAMicroExpert(hidden_dim, rank=rank, dtype=dtype).to("cpu")
-            for _ in range(num_experts)
-        ])
-        for p in self.lora_pool_cpu.parameters():
-            p.data = p.data.pin_memory()
+        # Tier-3：主机端专家池（pinned，形状 (E, r, D)，每专家 2*r*D*2B = 64KB）
+        self.host_lora_A = torch.zeros(num_experts,
+                                       rank,
+                                       hidden_dim,
+                                       dtype=dtype)
+        self.host_lora_B = torch.zeros(num_experts,
+                                       rank,
+                                       hidden_dim,
+                                       dtype=dtype)
+        self.host_pinned = False
+
+        # 常驻 staging buffer：k 个槽位 x 2 组，做 ping-pong
+        self.staging_A = [
+            torch.empty(self.top_k, rank, hidden_dim, device=device,
+                        dtype=dtype) for _ in range(num_staging_buffers)
+        ]
+        self.staging_B = [
+            torch.empty(self.top_k, rank, hidden_dim, device=device,
+                        dtype=dtype) for _ in range(num_staging_buffers)
+        ]
+        self.staging_events = [torch.cuda.Event() for _ in range(num_staging_buffers)]
+        cur = torch.cuda.current_stream()
+        for ev in self.staging_events:  # 首拍不要阻塞
+            ev.record(cur)
+        self._staging_idx = 0
 
         self.transfer_stream = torch.cuda.Stream(device=device)
 
-        self.token_expert_counter = Counter()
-        self.total_arts_weight = 0.0
-        self.total_sci_weight = 0.0
+        # --- 遥测累加器：全部驻留 GPU，避免每层每 token 的 .item() 同步 ---
+        self.arts_acc = torch.zeros((), device=device, dtype=torch.float32)
+        self.sci_acc = torch.zeros((), device=device, dtype=torch.float32)
+        self.expert_call_counts = torch.zeros(num_experts,
+                                              device=device,
+                                              dtype=torch.long)
+
+    # ------------------------------------------------------------------
+    def load_expert_pool(self, lora_a: torch.Tensor, lora_b: torch.Tensor):
+        """把训练好的堆叠权重拷到 pinned 主机内存。
+
+        dtype 跟随模型自身，不做隐式降级——否则 fp32/fp16 推理时专家池会被
+        悄悄压成 bf16，训练侧与推理侧产生无法解释的数值偏差。
+        """
+        expected = (self.num_experts, self.rank, self.hidden_dim)
+        assert tuple(lora_a.shape) == expected, f"lora_A 形状应为 {expected}"
+        assert tuple(lora_b.shape) == expected, f"lora_B 形状应为 {expected}"
+        self.host_lora_A = lora_a.detach().to("cpu", self.dtype).contiguous(
+        ).pin_memory()
+        self.host_lora_B = lora_b.detach().to("cpu", self.dtype).contiguous(
+        ).pin_memory()
+        self.host_pinned = True
 
     def reset_stats(self):
-        self.token_expert_counter.clear()
-        self.total_arts_weight = 0.0
-        self.total_sci_weight = 0.0
+        self.arts_acc.zero_()
+        self.sci_acc.zero_()
+        self.expert_call_counts.zero_()
 
+    # ------------------------------------------------------------------
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        current_token = x[:, -1:, :]
+        assert self.host_pinned, "Tier-3 专家池尚未 pin 到主机内存！"
+        bsz, seqlen, dim = x.shape
+        n = bsz * seqlen
 
-        router_big_logits = self.router_big(current_token)
-        weights_big = torch.softmax(router_big_logits, dim=-1)
-
-        self.total_arts_weight += weights_big[0, 0, 0].item()
-        self.total_sci_weight += weights_big[0, 0, 1].item()
-
+        # --- 大核：逐位置路由（与训练完全一致；decode 时等价于只看最后 token）---
+        router_big_logits = self.router_big(x)
+        weights_big = torch.softmax(router_big_logits.float(),
+                                    dim=-1).to(x.dtype)
         arts_out = self.big_arts(x)
         sci_out = self.big_sci(x)
         big_out = (weights_big[..., 0:1] * arts_out) + (weights_big[..., 1:2] *
                                                         sci_out)
 
-        router_little_logits = self.router_little(current_token)
-        topk_scores, topk_indices = torch.topk(router_little_logits,
-                                               k=self.top_k,
-                                               dim=-1)
-        topk_probs = torch.softmax(topk_scores, dim=-1)
+        # --- 小核：prefill 用最后一个 token 决定专家集合（一个 prompt 只搬一轮）---
+        last_tok = x[:, -1:, :]
+        router_little_logits = self.router_little(last_tok)
+        probs = torch.softmax(router_little_logits.float(), dim=-1).to(x.dtype)
+        topv, topi = torch.topk(probs, self.top_k, dim=-1)
+        topv = topv / topv.sum(-1, keepdim=True)
 
-        selected_ids = topk_indices[0, -1].tolist()
-        weights_little = topk_probs[0, -1]
+        # 遥测：GPU 侧累加，零同步
+        self.arts_acc += weights_big[0, -1, 0].float()
+        self.sci_acc += weights_big[0, -1, 1].float()
+        self.expert_call_counts.index_add_(
+            0, topi[0, -1],
+            torch.ones(self.top_k, device=self.device, dtype=torch.long))
 
-        for eid in selected_ids:
-            self.token_expert_counter[eid] += 1
+        # 唯一的 D2H 同步：专家下标 + 归一化权重，一次打包取回
+        info = torch.stack([topi[0, -1].to(x.dtype),
+                            topv[0, -1]]).to("cpu")
+        info_list = info.tolist()
+        selected_ids = [int(v) for v in info_list[0]]
+        lora_weights = [float(v) for v in info_list[1]]
 
-        lora_out = torch.zeros_like(big_out)
-        for weight, expert_idx in zip(weights_little, selected_ids):
-            with torch.cuda.stream(self.transfer_stream):
-                expert_gpu = self.lora_pool_cpu[expert_idx].to(
-                    self.device, non_blocking=True)
-            torch.cuda.current_stream().wait_stream(self.transfer_stream)
-            lora_out = lora_out + (weight * expert_gpu(x))
+        # --- Tier-3：一次性把 k 个专家发到 transfer_stream，再统一等待 ---
+        slot = self._staging_idx
+        self._staging_idx = (self._staging_idx + 1) % len(self.staging_A)
 
-        return big_out + (lora_out * 0.3)
+        # 等待两拍之前读这块 buffer 的计算结束，保证不会覆写正在被用的数据
+        self.transfer_stream.wait_event(self.staging_events[slot])
+        with torch.cuda.stream(self.transfer_stream):
+            for j, eid in enumerate(selected_ids):
+                self.staging_A[slot][j].copy_(self.host_lora_A[eid],
+                                              non_blocking=True)
+                self.staging_B[slot][j].copy_(self.host_lora_B[eid],
+                                              non_blocking=True)
+        torch.cuda.current_stream().wait_stream(self.transfer_stream)
+
+        # --- 融合：k 次 (N,r)x(r,D) 小 GEMM，用 addmm_ 原地累加 ---
+        x2d = x.reshape(n, dim)
+        a_buf = self.staging_A[slot]
+        b_buf = self.staging_B[slot]
+        lora_flat = torch.zeros(n, dim, device=self.device, dtype=x.dtype)
+        for j, w in enumerate(lora_weights):
+            h = torch.matmul(x2d, a_buf[j].t())  # (N, r)
+            lora_flat.addmm_(h, b_buf[j], alpha=w)  # lora_flat += w * h @ B
+
+        # 标记本拍读取该 buffer 的计算，供两拍后的拷贝等待
+        self.staging_events[slot].record(torch.cuda.current_stream())
+
+        lora_out = (lora_flat.reshape(bsz, seqlen, dim) * self.scaling)
+        return big_out + self.gamma * lora_out
 
 
 # ----------------------------------------------------------------------
 # 2. 遥测透析
 # ----------------------------------------------------------------------
 def show_dual_brain_dashboard(model):
-    total_arts = sum(layer.mlp.total_arts_weight
-                     for layer in model.model.layers)
-    total_sci = sum(layer.mlp.total_sci_weight for layer in model.model.layers)
+    # 只在这里做 GPU -> CPU，一次性取回全部统计量
+    layers = list(model.model.layers)
+    total_arts = torch.stack(
+        [layer.mlp.arts_acc for layer in layers]).sum().item()
+    total_sci = torch.stack([layer.mlp.sci_acc for layer in layers]).sum().item()
     all_big = total_arts + total_sci
 
-    arts_pct = (total_arts / all_big * 100) if all_big > 0 else 50
-    sci_pct = (total_sci / all_big * 100) if all_big > 0 else 50
+    arts_pct = (total_arts / all_big * 100) if all_big > 0 else 50.0
+    sci_pct = (total_sci / all_big * 100) if all_big > 0 else 50.0
 
-    total_counter = Counter()
-    for layer in model.model.layers:
-        total_counter.update(layer.mlp.token_expert_counter)
+    total_counter = torch.stack(
+        [layer.mlp.expert_call_counts for layer in layers]).sum(0).cpu()
+    counts = total_counter.tolist()
 
-    code_calls = sum(total_counter[i] for i in range(0, 8))
-    math_calls = sum(total_counter[i] for i in range(8, 16))
-    writing_calls = sum(total_counter[i] for i in range(16, 32))
-    all_little = code_calls + math_calls + writing_calls
+    group_calls = [sum(counts[lo:hi]) for lo, hi in GROUP_BOUNDS]
+    all_little = sum(group_calls)
 
     print("\n" + "═" * 70)
-    print("🧠【双大核能量分配 (Tier-1 GPU Resident)】:")
+    print("🧠【双大核能量分配 (Tier-1 & Tier-2 GPU Resident)】:")
     print(
         f"   🏛️  文科原版大核: {arts_pct:5.1f}% [{'█' * int(arts_pct // 5):<20}] (负责语言通顺与常识底座)"
     )
@@ -142,13 +229,15 @@ def show_dual_brain_dashboard(model):
     )
     print("─" * 70)
     if all_little > 0:
-        c_pct = (code_calls / all_little) * 100
-        m_pct = (math_calls / all_little) * 100
-        w_pct = (writing_calls / all_little) * 100
-        print("🧩【微专家协同分布 (Tier-2 RAM Streaming)】:")
-        print(f"   💻 代码微专家:   {c_pct:5.1f}% ({code_calls:,} 次调用)")
-        print(f"   🧮 数学微专家:   {m_pct:5.1f}% ({math_calls:,} 次调用)")
-        print(f"   ✍️  写作微专家:   {w_pct:5.1f}% ({writing_calls:,} 次调用)")
+        print("🧩【微专家协同分布 (Tier-3 Host RAM Streaming)】:")
+        for label, (lo, hi), calls in zip(GROUP_LABELS, GROUP_BOUNDS,
+                                          group_calls):
+            pct = calls / all_little * 100
+            size = hi - lo
+            # 均衡度：实际占比 / 按容量应得占比，1.0 = 完全均衡
+            fair = size / len(counts) * 100
+            print(f"   {label}微专家: {pct:5.1f}% ({calls:,} 次调用, "
+                  f"{size} 个专家, 均衡度 {pct/fair:.2f})")
     print("═" * 70)
 
 
@@ -156,7 +245,6 @@ def show_dual_brain_dashboard(model):
 # 3. 对话循环
 # ----------------------------------------------------------------------
 def main():
-    model_id = "Qwen/Qwen3-0.6B"
     weights_path = "dual_big_resurrect_weights.pt"
 
     assert os.path.exists(
@@ -167,37 +255,38 @@ def main():
     print("=" * 70)
 
     dtype = torch.bfloat16
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
     eos_token_ids = [tokenizer.eos_token_id]
     im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")
     if im_end_id is not None and im_end_id != tokenizer.unk_token_id:
         eos_token_ids.append(im_end_id)
 
-    model = AutoModelForCausalLM.from_pretrained(model_id,
+    model = AutoModelForCausalLM.from_pretrained(MODEL_ID,
                                                  dtype=dtype,
                                                  device_map="cuda:0")
     hidden_dim = model.config.hidden_size
+    model.eval()
 
     for layer in model.model.layers:
         layer.mlp = DualBigResurrectInferenceWrapper(layer.mlp,
                                                      hidden_dim,
-                                                     rank=16,
-                                                     num_experts=32,
-                                                     top_k=8,
                                                      device="cuda:0",
                                                      dtype=dtype)
 
-    print(f"[*] 正在挂载复活成功的双大核与微专家权重...")
-    saved_weights = torch.load(weights_path, map_location="cpu")
+    print("[*] 正在挂载复活成功的双大核与微专家权重...")
+    saved_weights = torch.load(weights_path,
+                               map_location="cpu",
+                               weights_only=True)
     for i, layer in enumerate(model.model.layers):
         layer.mlp.big_sci.load_state_dict(saved_weights[f"layer_{i}_big_sci"])
         layer.mlp.router_big.load_state_dict(
             saved_weights[f"layer_{i}_router_big"])
         layer.mlp.router_little.load_state_dict(
             saved_weights[f"layer_{i}_router_little"])
-        layer.mlp.lora_pool_cpu.load_state_dict(
-            saved_weights[f"layer_{i}_loras"])
+        layer.mlp.load_expert_pool(saved_weights[f"layer_{i}_lora_A"],
+                                   saved_weights[f"layer_{i}_lora_B"])
+    del saved_weights
 
     print("\n✅ 双脑已满血复活！随时可以提问。")
     print("👉 提示：输入 'clear' 重置记忆，输入 'exit' 退出\n")

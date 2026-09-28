@@ -1,243 +1,256 @@
-# DualBigLittle-MoE: A Tri-Tier Hierarchical MoE Architecture with Dual Dense VRAM Cores & Streaming Micro-Expert Clusters
+# DualBigLittle-MoE
 
-[![GitHub](https://img.shields.io/badge/GitHub-DualBigLittle--MoE-181717?style=flat&logo=github&logoColor=white)](https://github.com/aifeifei798/DualBigLittle-MoE)
-[![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-DualBigLittle--MoE-yellow?style=flat)](https://huggingface.co/aifeifei798/DualBigLittle-MoE)
-[![Framework](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c.svg?style=flat&logo=pytorch&logoColor=white)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=flat)](https://opensource.org/licenses/Apache-2.0)
+**在消费级显卡上用「大核 + 小核」分层结构做文理双域 MoE**
 
----
-
-## 1. Executive Summary & TL;DR
-
-Standard Mixture-of-Experts (MoE) architectures face a persistent dilemma:
-1. **The Domain Skew Problem:** MoE models frequently excel in creative writing, humanities, and general conversation, but degrade sharply in rigorous STEM domains (algorithms, mathematical proofs, and symbolic logic) due to gradient interference and token-level dilution.
-2. **The VRAM Capacity Wall:** Scaling full-scale FFN experts causes memory usage to explode, restricting deployment to multi-GPU enterprise clusters and preventing local execution on consumer workstations and edge hardware.
-
-**DualBigLittle-MoE** resolves both challenges by introducing a **Tri-Tier Hierarchical MoE Topology** inspired by modern tri-cluster mobile CPU architectures (Ultra-Cores + Performance-Cores + Efficiency-Cores):
-
-* **Tier 1 (GPU VRAM — Arts & Language Anchor Core):** The original, pristine dense MLP permanently pinned and frozen in VRAM to guarantee zero degradation in natural language fluency, commonsense reasoning, and syntax.
-* **Tier 2 (GPU VRAM — STEM Specialized Twin Core):** A dedicated, full-capacity dense MLP specialized through contrastive low-temperature adaptation ($lr = 2\times 10^{-5}$) to handle code synthesis, algebraic derivations, and hard logic with zero PCIe latency.
-* **Tier 3 (Host DDR5 RAM — 896-Expert Streaming Pool):** Hundreds of ultra-compact micro-experts (Rank-16 LoRA adapters, ~64 KB each) stored in host pinned RAM and dynamically streamed over PCIe DMA per token without consuming valuable VRAM.
-
-### Empirical Milestones
-* **98.0% vs. 78.8% Clean Domain Separation:** During interactive generation, the macro-router exhibits unprecedented domain bifurcation: activating **98.0% STEM Core** for Python algorithms and shifting to **78.8% Arts Core** for literary prose.
-* **Zero VRAM Bloat:** Adding 28 layers of dedicated STEM big cores and 896 micro-experts requires only **~560 MB** of additional VRAM, fitting easily within entry-level GPUs.
-* **Real-Time Streaming Throughput:** Sustains **17.0 – 22.0 tokens/second** on consumer hardware while dynamically streaming and fusing Top-8 micro-experts per token ($28 \text{ layers} \times 8 = 224$ dynamic transfers per token).
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Framework](https://img.shields.io/badge/Framework-PyTorch-orange.svg)](https://pytorch.org/)
+[![Hardware](https://img.shields.io/badge/Hardware-Consumer_GPU-green.svg)](https://github.com/)
 
 ---
 
-## 2. The Tri-Tier Heterogeneous Architecture
+## 1. 这个项目解决什么
 
-Rather than treating experts as homogeneous computational blocks, DualBigLittle-MoE decomposes model capacity across a three-tier pyramid:
+标准 MoE 有两个绕不开的问题：
 
-```text
-========================================================================================
-                          TRI-TIER HIERARCHICAL TOPOLOGY
-========================================================================================
+1. **领域偏斜**——模型在写作、常识上表现好，在代码、数学上明显退化
+2. **显存墙**——MoE 的 FFN 专家体积大，扩展即显存爆炸，只能上多卡集群
 
- [ Token Input Activation: x ]
-               │
-               ▼
- ┌────────────────────────────────────────────────────────────────────────────────────┐
- │  MACRO ROUTING CONTROLLER (Layer-wise Domain Discriminator)                        │
- │  Scores semantic intent: [ w_arts, w_sci ]                                         │
- └─────────────────────────┬────────────────────────────────────────┬─────────────────┘
-                           │                                        │
-                           ▼                                        ▼
- ┌──────────────────────────────────────────────┐  ┌──────────────────────────────────┐
- │ TIER 1: Arts Anchor Core (VRAM Resident)     │  │ TIER 2: STEM Specialized Core    │
- │ - Original Pretrained Qwen MLP               │  │ - Cloned & Contrastively Tuned   │
- │ - 100% Frozen (Guarantees zero regression)   │  │ - Pinned in VRAM (0 PCIe latency)│
- │ - Computes general grammar, context & prose  │  │ - Solves math, logic & algorithms│
- └──────────────────────┬───────────────────────┘  └────────────────┬─────────────────┘
-                        │                                           │
-                        └─────────────────────┬─────────────────────┘
-                                              │ Intra-VRAM Weighted Fusion
-                                              ▼
-                                   [ Dense Base Output: Y_big ]
-                                              │
-                                              ▼
- ┌────────────────────────────────────────────────────────────────────────────────────┐
- │ TIER 3: Host-RAM Micro-Expert Pool (896 Pinned LoRA Adapters in 56 MB DDR5)        │
- │ - Micro Router selects Top-8 domain-specific specialists per token                 │
- │ - Streamed asynchronously over PCIe DMA via non-blocking CUDA Streams              │
- │ - Code Experts (#00-#07) | Math Experts (#08-#15) | Writing Experts (#16-#31)      │
- └────────────────────────────────────────────┬───────────────────────────────────────┘
-                                              │
-                                              ▼
-                    [ Final Output: Y = Y_big + 0.3 * Y_little ]
-========================================================================================
-```
+DualBigLittle-MoE 的思路是借鉴移动端三簇 CPU（大核 / 小核 / 能效核），把模型容量拆到三个物理位置：
 
-### Detailed Tier Breakdown
-
-#### Tier 1: The Arts & Language Anchor Core (GPU VRAM)
-* **Design Philosophy:** Preserves foundational intelligence. Foundational language models undergo millions of dollars of pre-training; fine-tuning them aggressively ruins their fragile conversational and literary nuance.
-* **Mechanism:** Retains the native `Qwen3-0.6B` MLP block, strictly setting `requires_grad = False`. It guarantees that no matter how complex the downstream STEM training is, the model's literary mastery remains uncorrupted.
-
-#### Tier 2: The STEM Specialized Twin Core (GPU VRAM)
-* **Design Philosophy:** Tackles the "STEM amnesia" of classical MoE. Mathematical equations and code syntax demand dedicated, dense capacity rather than transient low-rank matrices.
-* **Mechanism:** 1:1 cloned from the native MLP and adapted using contrastive supervised tuning with an ultra-conservative learning rate ($2\times 10^{-5}$). Resident inside VRAM, it runs concurrently with Tier 1 at full tensor-core throughput with zero PCIe penalty.
-
-#### Tier 3: The 896 Micro-Expert Pool (Host RAM Streaming)
-* **Design Philosophy:** Extreme modularity and zero VRAM tax.
-* **Mechanism:** 32 Rank-16 LoRA micro-experts per layer ($32 \times 28 = 896$ total), occupying only 56.00 MB in Host RAM. For every token, the micro-router dispatches the Top-8 adapters per layer, streaming them over page-locked PCIe DMA into compute buffers.
-
----
-
-## 3. Mathematical Formulation & Hierarchical Forward Pass
-
-For an input activation $\mathbf{x} \in \mathbb{R}^{B \times S \times D}$:
-
-### Step 1: Macro Domain Routing
-The Macro Router generates a normalized probability distribution across the two dense cores:
-
-$$
-[w_{\text{arts}}, w_{\text{sci}}] = \text{Softmax}(\mathbf{W}_{\text{macro}} \cdot \mathbf{x}_{[-1, :]})
-$$
-
-### Step 2: Dense Core Dual-Engine Fusion
-Both cores compute concurrently in GPU VRAM without bus transfers:
-
-$$
-\mathbf{y}_{\text{big}} = w_{\text{arts}} \cdot \text{FFN}^{\text{Arts}}(\mathbf{x}) + w_{\text{sci}} \cdot \text{FFN}^{\text{STEM}}(\mathbf{x})
-$$
-
-### Step 3: Micro-Expert DMA Streaming & Aggregation
-The Micro Router evaluates candidate adapters in Host RAM and dispatches the Top-8 candidates:
-
-$$
-\mathbf{y}_{\text{little}} = \sum_{i \in \text{Top-}8} \omega_i \cdot \left( \mathbf{W}_B^{(i)} \mathbf{W}_A^{(i)} \mathbf{x} \cdot \frac{\alpha}{r} \right)
-$$
-
-### Step 4: Final Layer Synthesis
-
-$$
-\mathbf{y}_{\text{final}} = \mathbf{y}_{\text{big}} + \gamma \cdot \mathbf{y}_{\text{little}} \quad (\text{where } \gamma = 0.3)
-$$
-
----
-
-## 4. Empirical Evaluation: Real-World Gating Verification
-
-Tested interactively on an **NVIDIA RTX 5090 D** workstation running `chat_dual_big_resurrect.py`:
-
-### Experiment 1: Algorithmic Synthesis (Python Quicksort)
-* **Prompt:** `"Write a quicksort algorithm in Python with detailed comments."`
-* **Throughput:** **16.8 tokens/s** (121 tokens generated)
-* **Generated Output:**
-```python
-def quickSort(arr):
-    if len(arr) <= 1:
-        return arr
-    
-    pivot = arr[0]
-    left = [x for x in arr if x < pivot]
-    right = [x for x in arr if x > pivot]
-
-    quickSort(left)
-    quickSort(right)
-
-    arr.insert(0, pivot)
-    return arr
-```
-* **Neural Activity Breakdown:**
-```text
-══════════════════════════════════════════════════════════════════════
-🧠【Dual-Core Energy Allocation (Tier-1 & Tier-2 GPU Resident)】:
-   🏛️  Arts Anchor Core:     2.0% [                    ]
-   🔬 STEM Twin Core:       98.0% [███████████████████ ] <--- Near-Total Handover
-──────────────────────────────────────────────────────────────────────
-🧩【Micro-Expert Distribution (Tier-3 Host RAM Streaming)】:
-   💻 Code Specialists:     29.6% (8,095 calls)
-   🧮 Math Specialists:     25.5% (6,957 calls)
-   ✍️  Writing Specialists:  44.9% (12,276 calls)
-══════════════════════════════════════════════════════════════════════
-```
-
----
-
-### Experiment 2: Creative & Descriptive Prose
-* **Prompt:** `"Write a delicate and poetic description of a rainy cobblestone alley in Jiangnan."`
-* **Throughput:** **18.8 tokens/s** (145 tokens generated)
-* **Generated Output:**
-```text
-Jiangnan is an alley that has many people watching on the streets below it, especially those beautiful, quiet and peaceful weather. It was bustling with its residents as they walked through the cobblestones. The weather had become more unpredictable; there were no raindrops or snowflakes. Instead, the sky had been too high a level and the atmosphere seemed to be so different from what kind of weather. A big roof had become one of the best structure for the weather, but even though the weather wasn't the main objective, it had a lot less of appeal value...
-```
-* **Neural Activity Breakdown:**
-```text
-══════════════════════════════════════════════════════════════════════
-🧠【Dual-Core Energy Allocation (Tier-1 & Tier-2 GPU Resident)】:
-   🏛️  Arts Anchor Core:    78.8% [███████████████     ] <--- Re-established Control
-   🔬 STEM Twin Core:       21.2% [████                ]
-──────────────────────────────────────────────────────────────────────
-🧩【Micro-Expert Distribution (Tier-3 Host RAM Streaming)】:
-   💻 Code Specialists:     28.9% (9,466 calls)
-   🧮 Math Specialists:     24.7% (8,080 calls)
-   ✍️  Writing Specialists:  46.3% (15,158 calls)
-══════════════════════════════════════════════════════════════════════
-```
-
----
-
-## 5. Architectural Comparison
-
-| Dimension | Standard Dense (Qwen-0.6B) | Classic MoE (Mixtral-style) | DualBigLittle-MoE (Ours) |
+| 层 | 位置 | 内容 | 作用 |
 | :--- | :--- | :--- | :--- |
-| **VRAM Footprint** | ~1.14 GB | > 14.0 GB | **~1.70 GB** |
-| **STEM Specialization** | Baseline | Often diluted by text corpus | **98.0% dedicated STEM core** |
-| **Literary Quality** | Baseline | Prone to grammatical degradation | **100% frozen Arts anchor** |
-| **Expert Count** | 0 | 8 - 16 full MLPs | **2 Big Cores + 896 Micro-Experts** |
-| **Offloading Efficiency**| N/A | High latency (GB-scale transfers) | **Microsecond DMA (~56 KB chunks)** |
-| **Generation Speed** | ~22.0 t/s | Bottlenecked on consumer VRAM | **17.0 - 22.0 t/s (Streaming)** |
+| **Tier 1** 文科锚核 | GPU 显存 | 原版 MLP，**完全冻结** | 语言底座，保证不退化 |
+| **Tier 2** 理科孪生核 | GPU 显存 | 克隆 MLP，低学习率微调 | 代码、数学、逻辑 |
+| **Tier 3** 微专家池 | 主机 pinned RAM | 896 个 rank-16 LoRA，**56 MiB** | 细粒度专家，按需流式搬运 |
+
+```
+                              Token 激活 x
+                                   │
+                     ┌─────────────┴─────────────┐
+                     ▼                           ▼
+            ┌─────────────────┐         ┌─────────────────┐
+            │ Tier 1 文科锚核  │         │ Tier 2 理科孪生核│
+            │  原版 MLP · 冻结 │         │  克隆 MLP · 微调 │
+            │  常驻 VRAM      │         │  常驻 VRAM      │
+            └────────┬────────┘         └────────┬────────┘
+                     └────────────┬──────────────┘
+                                  ▼
+                        y_big = w_arts·FFN_arts
+                              + w_sci ·FFN_sci
+                                  │
+                                  ▼
+            ┌────────────────────────────────────────┐
+            │ Tier 3 微专家池（主机 pinned RAM）      │
+            │ 896 个 rank-16 LoRA，每层选 Top-8      │
+            │ 经 PCIe DMA 流式搬入 compute buffer     │
+            │ #0-7 代码 │ #8-15 数学 │ #16-31 写作    │
+            └───────────────────┬────────────────────┘
+                                ▼
+              y = y_big + 0.3 · Σ wᵢ · LoRAᵢ(x)
+```
 
 ---
 
-## 6. Quickstart & Usage
+## 2. 实测数据
 
-### 1. Environment Setup
-```bash
-git clone https://github.com/aifeifei798/DualBigLittle-MoE.git
-cd DualBigLittle-MoE
-pip install torch transformers accelerate datasets
+全部数据在 **RTX 5090 D** 上测得，可复现（见 §5）。
+
+### 资源占用
+
+| 项目 | 数值 |
+| :--- | :--- |
+| Qwen3-0.6B 基座 | 1136.9 MiB (bf16) |
+| Tier-2 理科大核增量 | **+504.0 MiB** |
+| 路由器（28 层 × 2） | +3.7 MiB |
+| **常驻 VRAM 合计** | **1671.3 MiB** |
+| **生成峰值 VRAM** | **1719.8 MiB** |
+| **Tier-3 pinned 主机内存** | **56.0 MiB**（896 × 64 KiB） |
+| 训练峰值显存 | 12.73 GB |
+
+关键点：896 个微专家**完全不占 VRAM**。
+
+### 吞吐
+
+| 任务 | 速度 |
+| :--- | :--- |
+| 训练 | 5.11 分钟跑完 8000 条（26.1 samples/s，500 步） |
+| 推理（代码） | 26.0 tok/s |
+| 推理（数学） | 25.8 tok/s |
+| 推理（散文） | 25.9 tok/s |
+
+### 路由分化
+
+逐层统计 Code 语料 vs Arts 语料的理科核权重：
+
+```
+   层     Code     Arts       差值
+   0    76.8%    41.1%    +35.7%
+   8    93.1%    18.3%    +74.8%
+  16    94.8%     5.2%    +89.5%
+  27    95.9%     0.7%    +95.2%    <-- 末层判别力最强
 ```
 
-### 2. Generate Contrastive Training Corpus
-Prepares a balanced 50/50 dataset (4,000 STEM vs. 4,000 Arts samples):
+末层 Code 走理科核 95.8%，Arts 只走 4.4%。
+
+### 困惑度（vs 原生 Qwen3-0.6B）
+
+| 领域 | baseline | 双大核 | 变化 |
+| :--- | :--- | :--- | :--- |
+| Code | 10.9 | **4.9** | ↓ 55% |
+| Math | 7.7 | **3.8** | ↓ 51% |
+| Arts | 35.0 | **21.2** | ↓ 40% |
+
+三个领域全部改善，理科改善更明显，文科没有因为冻结 Tier-1 而停滞。
+
+### 专家健康度
+
+| 指标 | 数值 |
+| :--- | :--- |
+| 获得非零权重的专家 | **896 / 896** |
+| 完全未被调用的专家 | **0 / 32**（每层） |
+| 40 次相同前向的数值抖动 | **0.00** |
+
+---
+
+## 3. 关键实现
+
+### 3.1 微专家用堆叠权重，不是 ModuleList
+
+32 个 LoRA 存成两块 `(E, r, D)` 张量而非 32 个 `nn.Module`：
+
+```python
+self.lora_A = nn.Parameter(torch.empty(num_experts, rank, hidden_dim, ...))
+self.lora_B = nn.Parameter(torch.empty(num_experts, rank, hidden_dim, ...))
+
+# 前向：两次大 matmul 完成全部 32 个专家
+h = torch.matmul(x.reshape(n, dim), a_flat.t())   # (N, E*r)
+h = h * topk_mask_expanded                        # top-k 归一化权重
+y = torch.matmul(h, b_flat)                       # (N, D)
+```
+
+这样做的收益：
+
+- **梯度覆盖全部专家**。早期版本用 `ModuleList` + 单专家索引，8000 条语料的 label 只有 0/8/16 三个值，导致每层只有 3 个专家拿到梯度，其余 29 个因 `lora_B` 零初始化且无梯度更新而**输出恒为 0**——名义 896 个专家，实际 93 个能工作。
+- **不物化 `(N, E, D)` 激活**。稠密算完再按 top-k 掩码，显存可控。
+- **与推理路径数学等价**。训练用掩码、推理用 Top-8 搬运，公式完全一致（bf16 下相差 0.08 ULP）。
+
+### 3.2 两项辅助损失
+
+**分组级路由监督。** 小核的监督信号是「该用哪一组专家」而非「该用第几个专家」——组内做 logsumexp 池化后再算交叉熵：
+
+```python
+group_logits = torch.stack([
+    torch.logsumexp(little_logits[..., lo:hi], -1) - math.log(hi - lo)
+    for lo, hi in GROUP_BOUNDS
+], -1)
+```
+
+减去 `log(size)` 是必需的：各组大小不等（8 / 8 / 16），裸 logsumexp 会系统性偏向大组。
+
+**负载均衡损失。** Switch Transformer 风格，防止路由塌缩到少数专家：
+
+```python
+frac = topk_mask.mean(dim=0)      # 专家实际承接比例
+mean_p = probs.mean(dim=0)        # 路由器平均概率
+loss = num_experts * (frac * mean_p).sum()
+```
+
+### 3.3 Tier-3 流式搬运
+
+专家常驻主机 pinned 内存，每个 token 从每层选 Top-8 搬入显存 compute buffer。三个关键点：
+
+**常驻 staging buffer。** 不用 `caching allocator` 分配临时张量。这消除了一类真实的数据竞争：早期版本在 `transfer_stream` 上分配张量、在默认流上使用、随即出作用域被回收，下一轮 `.to()` 可能覆写正在被 matmul 读的数据。实测早期版本 40 次相同前向抖动 1.56e-2，修复后为 0.00。
+
+**双缓冲 ping-pong。** 两组 staging buffer 交替使用，每组配一个 `torch.cuda.Event`：
+
+```python
+self.transfer_stream.wait_event(self.staging_events[slot])   # 等两拍前的计算读完
+with torch.cuda.stream(self.transfer_stream):
+    for j, eid in enumerate(selected_ids):
+        self.staging_A[slot][j].copy_(self.host_lora_A[eid], non_blocking=True)
+        self.staging_B[slot][j].copy_(self.host_lora_B[eid], non_blocking=True)
+torch.cuda.current_stream().wait_stream(self.transfer_stream)
+```
+
+**遥测不打断流水线。** 路由统计全部在 GPU 上累加，每层每 token 只做一次 D2H——而那次同步本来就是要把专家下标取回主机内存发起搬运的，顺路把权重一起带回来。相比每层两次 `.item()`，吞吐提升 15.4%。
+
+### 3.4 训练配置
+
+| 参数组 | 学习率 | 说明 |
+| :--- | :--- | :--- |
+| Tier-2 理科大核 | 2e-5 | 微火慢炖 |
+| 路由器 | 3e-4 | 快速对齐 |
+| Tier-3 微专家 | 5e-4 | LoRA 快速学习 |
+
+```python
+total_loss = lm_loss                                    # 只监督 response，prompt 掩码
+           + 0.1 * (big_router_loss / num_layers)       # 大核域分类
+           + 0.1 * (little_router_loss / num_layers)    # 小核分组分类
+           + 0.01 * (load_balance_loss / num_layers)    # 专家负载均衡
+```
+
+---
+
+## 4. 已知局限
+
+如实记录，避免误判：
+
+- **`<think>` 推理链丢失。** 训练语料 8000 条中 0 条含 `<think>`，微调后模型直接给答案。这是数据选择的结果而非代码缺陷，但确实牺牲了 Qwen3 原生的推理链能力。困惑度换来了这个取舍。
+- **组间分布不均。** 10 prompt 累计下，代码组拿到 24.8% 调用、数学组 12.7%、写作组 62.4%（写作组有 16 个专家，天然占 50% 容量）。组内无饿死，但组间偏斜，`LOAD_BALANCE_WEIGHT` 可能需要调大。
+- **第 0 层路由较弱。** 判别力 76.8% vs 41.1%，明显弱于后续各层。逐层看分化是清晰的，但跨层平均会被第 0 层拉低。
+- **Tier-3 搬运有实打实的开销。** 去掉小核后 decode 从 38.3ms 降到 27.7ms，Tier-3 占 28%。这是 host-RAM 流式架构的固有代价——相比 GPU 驻留的同规模 MoE，换来的是 56 MiB 主机内存而非数 GB 显存。
+- **prefill 路由不对称。** 训练时小核逐位置选专家，推理时一个 prompt 只按末 token 选一组专家（否则 prompt 有多少 token 就要搬多少轮专家）。decode 阶段两者一致。
+
+---
+
+## 5. 快速开始
+
+### 环境
+
 ```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt      # torch, transformers, accelerate, datasets
+```
+
+需要一块 CUDA 显卡。开发与实测环境：RTX 5090 D + PyTorch 2.14 + transformers 5.17。
+
+### 跑起来
+
+```bash
+# 1. 准备语料（仓库已附带 dual_contrast_data.jsonl，可跳过）
 python prepare_dual_data.py
-```
 
-### 3. Contrastive Differential Training (~3.5 minutes on RTX 5090 / 4090)
-Trains the Tier-2 STEM Core with differential learning rates ($2\times 10^{-5}$ for big weights, $5\times 10^{-4}$ for LoRA adapters):
-```bash
+# 2. 训练（约 5 分钟）
 python train_dual_big_resurrect.py
-```
 
-### 4. Launch Interactive Dual-Brain Streaming Terminal
-```bash
+# 3. 交互对话
 python chat_dual_big_resurrect.py
 ```
 
-* **Interactive Controls:**
-  * Type `clear` to reset dialogue memory.
-  * Type `exit` or `quit` to end the session.
-  * Press `Ctrl + C` to interrupt text generation cleanly.
+对话终端支持：
+
+- `clear` — 重置对话记忆
+- `exit` / `quit` — 退出
+- `Ctrl+C` — 中断当前生成
+
+每次回答后会打印双核能量分配与微专家调用分布。
 
 ---
 
-## 7. Edge AI & Mobile Feasibility (Unified Memory Architecture)
+## 6. 文件说明
 
-While evaluated here on discrete consumer GPUs over PCIe, DualBigLittle-MoE is architected specifically for **Edge SoCs with Unified Memory (UMA)** (e.g., Apple M-Series, Qualcomm Snapdragon 8 Elite, MediaTek Dimensity 9400):
+| 文件 | 作用 |
+| :--- | :--- |
+| `prepare_dual_data.py` | 从 HF 拉取并拼接 4000 理科 + 4000 文科对抗语料 |
+| `train_dual_big_resurrect.py` | 植入双大核架构，分级学习率训练 |
+| `chat_dual_big_resurrect.py` | 加载权重、PCIe 流式推理、交互终端 |
+| `dual_contrast_data.jsonl` | 8000 条训练语料（已附带） |
 
-* **Zero-Copy Instant Switching:** On unified memory systems, PCIe transfer overhead drops to **zero**. The NPU and GPU access Tier 3 micro-experts in place via pointer dereferencing.
-* **Low Thermal Footprint:** Because Tier-1 and Tier-2 compute is sparse and only Top-8 micro-experts activate per step, power consumption remains strictly constrained (< 2.5 W), preventing thermal throttling on mobile devices.
+`dual_big_resurrect_weights.pt` 由训练生成，不入版本库。
 
 ---
 
-## 8. Citation
-
-If you incorporate the Tri-Tier DualBigLittle-MoE architecture into your research, systems design, or edge deployment pipelines, please cite:
+## 7. 引用
 
 ```bibtex
 @misc{dualbiglittle_moe_2026,
@@ -249,3 +262,6 @@ If you incorporate the Tri-Tier DualBigLittle-MoE architecture into your researc
 }
 ```
 
+## 许可
+
+[Apache 2.0](LICENSE)

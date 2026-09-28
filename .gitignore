@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+
+# 训练产物（由 train_dual_big_resurrect.py 生成）
+dual_big_resurrect_weights.pt
