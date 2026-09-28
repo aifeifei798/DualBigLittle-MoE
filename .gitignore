@@ -12,3 +12,6 @@ reports/*.jsonl
 
 # 诊断脚本产生的中间 checkpoint
 checkpoints/sweep_*.pt
+
+# 一次性冒烟测试产物
+reports/smoke.json
