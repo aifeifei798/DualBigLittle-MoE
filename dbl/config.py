@@ -63,7 +63,13 @@ class Config:
     num_workers: int = 4
 
     # ---- 运行 ----
-    device: str = "cuda:0"
+    #: 设备。``"auto"`` 启动时探测最空的卡；``"cuda:1"`` 指定卡；
+    #: ``"cpu"`` 强制 CPU（仅供单测/无显卡调试）。
+    #:
+    #: 历史问题：这里硬编码 ``"cuda:0"``，在无显卡机器上要等到
+    #: ``from_pretrained`` 或 ``torch.cuda.Stream`` 才炸，报错指不到根因。
+    #: 现在统一走 :func:`dbl.runtime.resolve_device` 校验。
+    device: str = "auto"
     dtype: str = "bfloat16"
     data_path: str = "dual_contrast_data.jsonl"
     weights_path: str = "dual_big_resurrect_weights.pt"
@@ -118,6 +124,31 @@ class Config:
 
     def replace(self, **kw: Any) -> Config:
         return dataclasses.replace(self, **kw)
+
+    def resolve_device(self, *, allow_cpu: bool = True) -> str:
+        """把 :attr:`device` 归一化成真正可用的设备串。
+
+        ``device`` 为 ``"auto"``（默认）时，先看环境变量 ``DBL_DEVICE``：
+        设了就用它，没设再自动探测。这样「临时换卡」只需
+        ``DBL_DEVICE=cuda:1 python ...``，不必改代码或每次传 ``--device``，
+        且对所有入口（训练 / 评估 / 诊断脚本）一致生效。
+
+        训练/评估入口应传 ``allow_cpu=False``，这样「本该上 GPU 却退回 CPU」
+        会立刻报错，而不是安静地跑出慢 50 倍但数值正常的结果。
+        """
+        import os
+
+        from .runtime import resolve_device
+
+        requested = self.device
+        if requested.strip().lower() in ("", "auto"):
+            requested = os.environ.get("DBL_DEVICE") or "auto"
+        return resolve_device(requested, allow_cpu=allow_cpu)
+
+    def to_device(self) -> Config:
+        """返回一个 device 已解析为本机实际设备的副本。"""
+        resolved = self.resolve_device(allow_cpu=True)
+        return self if resolved == self.device else self.replace(device=resolved)
 
     # ---- 序列化 ----
     def to_dict(self) -> dict[str, Any]:

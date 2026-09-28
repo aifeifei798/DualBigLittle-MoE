@@ -1,5 +1,18 @@
-# 锁定版本：本项目在以下组合上实测（RTX 5090 D / CUDA 13.0）
-# 评估与数字复现依赖完全一致的版本，请勿随意升级
+# 本项目实测通过的版本组合（RTX 5090 D / CUDA 13.0 / Python 3.12）。
+# 评估与数字复现依赖完全一致的版本，请勿随意升级。
+#
+# 关键：torch 必须装 CUDA 版。从 PyPI 直接装虽然 Linux x86_64 默认也是
+# CUDA 构建，但不保证带最新 sm_120（RTX 50 系）支持。推荐用 cu130 源：
+#
+#   pip install -r requirements.txt --extra-index-url \
+#       https://download.pytorch.org/whl/cu130
+#
+# 或直接用 uv（会自动读取 pyproject.toml 里的 index 配置）：
+#
+#   uv sync
+#
+# 若误装成 CPU-only torch，`python -c "import dbl.runtime as r; r.format_report()"`
+# 会明确告诉你，而不是等到训练中途才在 stream/event 上炸。
 torch==2.14.0
 transformers==5.17.0
 accelerate>=1.0

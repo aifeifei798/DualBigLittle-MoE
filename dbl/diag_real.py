@@ -14,12 +14,19 @@ from torch.utils.data import DataLoader
 
 from dbl.config import Config
 from dbl.data import DualContrastDataset
+from dbl.runtime import format_report, resolve_device
 from dbl.train import aux_losses, build_model, set_seed
 
-DEV = "cuda:0"
+#: 诊断脚本统一走设备解析（auto / cpu / cuda:N），不再硬编码卡号。
+#: 刻意保持为 "auto" 字面量而非导入期解析结果——否则本模块在没有
+#: 显卡的机器上连 import 都会失败。
+DEV = "auto"
 
 
 def main():
+    global DEV
+    DEV = resolve_device(DEV, allow_cpu=False)
+    print(format_report())
     cfg = Config(micro_batch=2, grad_accum_steps=2, num_workers=0, seed=0)
     set_seed(cfg.seed)
     model, mods, tok = build_model(cfg)

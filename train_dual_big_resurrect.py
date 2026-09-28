@@ -17,6 +17,7 @@ import argparse
 import logging
 
 from dbl.config import Config
+from dbl.runtime import fail_cli
 from dbl.train import train
 
 
@@ -48,10 +49,17 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
-    cfg = Config.load(args.config) if args.config else Config()
-    if args.out:
-        cfg = cfg.replace(weights_path=args.out)
-    cfg = cfg.apply_cli(args)
+    # 配置/设备错误收敛成一行人话，不给调用方一屏 traceback
+    try:
+        cfg = Config.load(args.config) if args.config else Config()
+        if args.out:
+            cfg = cfg.replace(weights_path=args.out)
+        cfg = cfg.apply_cli(args)
+        # 提前验设备：坏参数要在建模（几秒 + 显存）之前就暴露
+        cfg = cfg.replace(device=cfg.resolve_device(allow_cpu=False))
+    except (RuntimeError, ValueError) as exc:
+        fail_cli(exc, "train_dual_big_resurrect.py")
+        return
 
     info = train(
         cfg, resume=args.resume, log_every=args.log_every,

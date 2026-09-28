@@ -29,6 +29,7 @@ from .checkpoint import apply_checkpoint, load_checkpoint, save_checkpoint
 from .config import Config
 from .data import DualContrastDataset
 from .moe import TrainMoE, inject_moe
+from .runtime import log_device_banner
 
 log = logging.getLogger("dbl.train")
 
@@ -148,6 +149,11 @@ def grad_accum_scales(total_batches: int, accum_steps: int) -> list[float]:
 
 
 def build_model(cfg: Config):
+    # 就地解析设备：cfg.device 可能是 "auto"，而 from_pretrained 与
+    # inject_moe 的 staging buffer / transfer_stream 都需要具体设备串。
+    # 放在这里而不是只放在 train() 里，是为了让所有直接调用方
+    # （诊断脚本、实验代码）都自动受益。
+    cfg = cfg.replace(device=cfg.resolve_device(allow_cpu=True))
     tok = AutoTokenizer.from_pretrained(cfg.model_id)
     tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(
@@ -211,6 +217,14 @@ def train(
     delta_dtype: str | None = None,
 ) -> dict:
     set_seed(cfg.seed)
+
+    # 设备先落地再建模：cfg.device 可能是 "auto"，而 inject_moe 里的
+    # staging buffer / transfer_stream 都要按最终设备分配。allow_cpu=False
+    # 保证「本该上 GPU 却静默退回 CPU」在这里就暴露。
+    cfg = cfg.replace(device=cfg.resolve_device(allow_cpu=False))
+    log_device_banner(log, title="训练环境")
+    log.info("使用设备 %s", cfg.device)
+
     model, modules, tok = build_model(cfg)
     dataset = DualContrastDataset(cfg.data_path, tok, cfg)
 

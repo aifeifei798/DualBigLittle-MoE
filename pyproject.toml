@@ -10,6 +10,32 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 
+# 与 requirements.txt 保持一致（后者为 pip 用户保留）。
+# 历史问题：依赖只写在 requirements.txt 里，pyproject 的 dependencies
+# 是空的 —— 于是 `uv lock` / `uv sync` 只会锁住本项目自己，产出 1 个包的
+# 空锁文件，形同没锁；`uv run` 也不会装任何东西。
+dependencies = [
+    "torch==2.14.0",
+    "transformers==5.17.0",
+    "accelerate>=1.0",
+    "datasets>=4.0",
+    "numpy>=2.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+# torch 必须来自 CUDA 轮子源。PyPI 上的默认 torch 对 Linux x86_64
+# 同样是 CUDA 版，但索引不保证带最新 sm_120（RTX 50 系）支持，
+# 因此显式指定 cu130 源并锁死版本。
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
 [tool.setuptools]
 packages = ["dbl"]
 

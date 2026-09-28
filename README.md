@@ -157,8 +157,29 @@ int8 差分让体积降 45%，困惑度变化在第 4 位小数，实践中不�
 
 - `dbl/config.py` 是全部超参的唯一定义
 - `dbl/groups.py` 是专家分组拓扑的唯一定义
+- `dbl/runtime.py` 是设备解析的唯一定义
 - **checkpoint 自带 `config`**，推理端从文件反序列化重建，
   不再需要维护任何第二份常量
+
+### 3.1b 设备解析只有一个入口
+
+设备串此前硬编码在各脚本里（`DEV = "cuda:0"`），带来三类静默故障：
+
+1. 无显卡机器上跑到一半才炸，报错指向 `torch.cuda.Stream` 而非「没装 CUDA」
+2. `cuda:1` 不存在时，错误来自 `from_pretrained` 深处的调用栈
+3. 显卡算力不在 torch 预编译列表内，退化成 PTX JIT，
+   表现为「卡住了」而不是「不兼容」
+
+现在 `dbl/runtime.py` 把这些收敛到 `resolve_device()`，在**建模之前**完成校验：
+
+- `auto` 选当前最空的一张卡，多卡机上不固定 `cuda:0`
+- 训练 / 评估入口传 `allow_cpu=False`，**禁止静默退回 CPU** ——
+  否则「本该上 GPU 却拿到 CPU 的慢结果」看起来完全正常
+- 卡号写错（`cuda:9`）直接报「只检测到 N 张 GPU」，不降级、不加载模型
+- 算力不在 arch 列表时提前警告
+
+回归测试见 `tests/test_runtime.py`：用 monkeypatch 模拟「无卡 / 少卡 /
+算力不匹配」，因此这些分支在 CI 的 CPU 机器上也能覆盖。
 
 ### 3.2 微专家用堆叠权重
 
@@ -348,13 +369,50 @@ total_loss = lm_loss                                    # 只监督 response，p
 
 ### 环境
 
+推荐用 uv（会自动读取 `pyproject.toml` 里的 cu130 索引并锁定版本）：
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt          # 锁定版本
-pip install -r requirements-dev.txt      # 测试与 lint
+uv sync                # 按 uv.lock 装齐，含 torch 2.14.0+cu130
+uv sync --group dev    # 额外装 pytest / ruff
 ```
 
-需要一块 CUDA 显卡。
+或用 pip：
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt --extra-index-url \
+    https://download.pytorch.org/whl/cu130
+pip install -r requirements-dev.txt
+```
+
+**torch 必须是 CUDA 版。** 装成 CPU-only 版时，训练要等到
+`torch.cuda.Stream` 才报错，栈底信息完全指不到「装错包」这个根因。
+`pyproject.toml` 显式指定了 cu130 源并锁版本，就是为了避免这一步出错。
+
+### 环境体检
+
+```bash
+python doctor.py              # 依赖 / CUDA / 设备参数解析
+python doctor.py --gpu-check  # 额外加载模型，跑一次真实前向
+```
+
+`doctor.py` 会确认 torch 是不是 CUDA 版、当前卡算力是否在预编译 arch 列表内
+（不在则退回 PTX JIT，首个 kernel 会明显变慢），以及设备字符串能否正确解析。
+
+### 设备选择
+
+所有入口的 `--device` 都接受 `auto`（默认）/ `cpu` / `cuda` / `cuda:N`，
+由 `dbl/runtime.py` 统一解析：
+
+- `auto` **选当前最空的一张卡**（多卡机上不固定 `cuda:0`）
+- 训练与评估入口**不会静默退回 CPU**——显式要求 GPU 而环境不满足时
+  直接报错并给出修复命令
+- `cpu` 保留给单元测试与无显卡调试
+- 也可用环境变量 `DBL_DEVICE=cuda:1` 一次性覆盖
+
+设备串在建模之前就完成校验，因此 `--device cuda:9` 这类笔误会立刻
+以 `请求 'cuda:9'，但只检测到 1 张 GPU` 结束，而不是加载完 0.6B 模型
+才崩。
 
 ### 跑起来
 
@@ -407,6 +465,7 @@ ruff check .
 | :--- | :--- |
 | `dbl/config.py` | **全部超参的单一事实源** |
 | `dbl/groups.py` | **专家分组拓扑的唯一定义** |
+| `dbl/runtime.py` | **CUDA 设备解析与环境体检**（auto / cuda:N、arch 校验） |
 | `dbl/moe.py` | `DualBigLittleMoE` 基类 + `TrainMoE` / `InferMoE` |
 | `dbl/data.py` | 语料加载与标签掩码 |
 | `dbl/checkpoint.py` | 带 config 元信息的保存/加载、int8 量化差分 |
@@ -414,10 +473,11 @@ ruff check .
 | `dbl/prepare.py` | 语料装配（清洗、去重、切分） |
 | `dbl/migrate_ckpt.py` | 旧格式 checkpoint 迁移 |
 | `prepare_dual_data.py` | 语料装配入口 |
+| `doctor.py` | **环境体检入口**（一条命令确认跑在 CUDA 上） |
 | `train_dual_big_resurrect.py` | 训练入口 |
 | `chat_dual_big_resurrect.py` | 交互对话入口 |
 | `eval_ppl.py` | **分域评估与可复现性体检** |
-| `tests/` | 83 项测试 |
+| `tests/` | 134 项测试 |
 
 ---
 

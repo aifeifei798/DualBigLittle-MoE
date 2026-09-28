@@ -38,6 +38,7 @@ from dbl.checkpoint import apply_checkpoint, load_checkpoint
 from dbl.config import Config
 from dbl.data import DualContrastDataset, load_jsonl
 from dbl.moe import TrainMoE, inject_moe
+from dbl.runtime import device_report, fail_cli, format_report, resolve_device
 
 DOMAINS = ("Code", "Math", "Arts")
 
@@ -381,9 +382,18 @@ def main() -> None:
     ap.add_argument("--samples-per-domain", type=int, default=150)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--jitter-runs", type=int, default=20)
-    ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--device", default="auto",
+                    help="auto / cpu / cuda / cuda:N，默认自动探测")
     ap.add_argument("--skip-infer", action="store_true")
     args = ap.parse_args()
+
+    try:
+        args.device = resolve_device(args.device, allow_cpu=False)
+    except (RuntimeError, ValueError) as exc:
+        fail_cli(exc, "eval_ppl.py")
+        return
+    print(format_report())
+    print(f"[eval] 设备 {args.device}")
 
     torch.manual_seed(0)
     base_cfg = Config(data_path=args.data)
@@ -402,11 +412,15 @@ def main() -> None:
     print(f"[eval] 采样 {len(indices)} 条 | "
           f"{ {k: len(v) for k, v in domains.items()} }")
 
+    dev = device_report()
     report: dict[str, Any] = {
         "meta": {
             "base_model": base_cfg.model_id,
             "torch": torch.__version__,
-            "gpu": torch.cuda.get_device_name(0),
+            "device": args.device,
+            "gpu": dev.get("gpu", "cpu"),
+            "compute_capability": dev.get("compute_capability"),
+            "torch_cuda_build": dev.get("torch_cuda_build"),
             "samples_per_domain": args.samples_per_domain,
             "split": args.split,
             "data_path": args.data if args.split == "all"

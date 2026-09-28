@@ -13,10 +13,14 @@ import torch.nn as nn
 
 from dbl.config import Config
 from dbl.moe import TrainMoE
+from dbl.runtime import format_report, resolve_device
 
 DIM = 32
 N_EXPERTS, TOP_K, RANK = 8, 2, 4
-DEV = "cuda:0"
+#: 诊断脚本统一走设备解析（auto / cpu / cuda:N），不再硬编码卡号。
+#: 刻意保持为 "auto" 字面量而非导入期解析结果——否则本模块在没有
+#: 显卡的机器上连 import 都会失败。
+DEV = "auto"
 
 
 class MLP(nn.Module):
@@ -180,6 +184,10 @@ def step3():
 
 
 if __name__ == "__main__":
+    import dbl.diag_aux as self_mod
+
+    self_mod.DEV = resolve_device(self_mod.DEV, allow_cpu=False)
+    print(format_report())
     step1()
     step2()
     step3()

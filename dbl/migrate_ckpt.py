@@ -15,6 +15,7 @@ import torch
 from dbl.checkpoint import CHECKPOINT_KIND, save_checkpoint
 from dbl.config import Config
 from dbl.moe import inject_moe
+from dbl.runtime import resolve_device
 
 LEGACY_FMT = "legacy-flat-dict"
 
@@ -27,14 +28,20 @@ def detect_format(path: str) -> str:
 
 
 def migrate(
-    src: str, dst: str, cfg: Config, *, device: str = "cpu",
+    src: str, dst: str, cfg: Config, *, device: str = "auto",
     delta_dtype: str | None = None,
 ) -> dict:
     """读旧权重 -> 构建模块 -> 按新格式重新保存。
 
     结构超参必须与当初训练时一致（专家数、top-k、rank、gamma、分组），
     因此这里从 ``cfg`` 读取并写入 checkpoint。
+
+    ``device`` 默认 ``auto``：有卡就用卡（装载更快），无卡退回 CPU ——
+    迁移是一次性工具，不该因为缺显卡就拒绝干活。``save_checkpoint``
+    内部会把张量搬回 CPU 序列化，所以两条路径产物一致。
     """
+    device = resolve_device(device, allow_cpu=True)
+    cfg = cfg.replace(device=device)
     legacy = torch.load(src, map_location="cpu", weights_only=True, mmap=True)
     if legacy.get("kind") == CHECKPOINT_KIND:
         raise SystemExit(f"{src} 已是新格式，无需迁移")
@@ -42,7 +49,7 @@ def migrate(
     from transformers import AutoModelForCausalLM
 
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model_id, dtype=cfg.torch_dtype, device_map=device
+        cfg.model_id, dtype=cfg.torch_dtype, device_map=cfg.device
     )
     for p in model.parameters():
         p.requires_grad = False
@@ -78,7 +85,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--src", required=True)
     ap.add_argument("--dst", required=True)
-    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--device", default="auto",
+                    help="auto / cpu / cuda / cuda:N，默认自动探测")
     ap.add_argument("--delta-dtype", default=None, choices=[None, "int8"],
                     help="int8: 存相对基座的量化差分，体积约 1/4")
     ap.add_argument("--num-experts", type=int, default=None)

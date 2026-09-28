@@ -25,9 +25,13 @@ from dbl.checkpoint import apply_checkpoint, load_checkpoint
 from dbl.config import Config
 from dbl.data import DualContrastDataset
 from dbl.moe import inject_moe
+from dbl.runtime import format_report, resolve_device
 from dbl.train import train
 
-DEV = "cuda:0"
+#: 诊断脚本统一走设备解析（auto / cpu / cuda:N），不再硬编码卡号。
+#: 刻意保持为 "auto" 字面量而非导入期解析结果——否则本模块在没有
+#: 显卡的机器上连 import 都会失败，无法被测试导入。
+DEV = "auto"
 DOMAINS = ("Code", "Math", "Arts")
 VAL = "dual_contrast_val.jsonl"
 
@@ -90,6 +94,9 @@ def eval_ppl(weights, n=100, bs=8):
 
 
 def main():
+    global DEV
+    DEV = resolve_device(DEV, allow_cpu=False)
+    print(format_report())
     runs = [
         ("基线      lr_sci=2e-5 aux=0.1",   2e-5, 0.1),
         ("提容量    lr_sci=1e-4 aux=0.1",   1e-4, 0.1),

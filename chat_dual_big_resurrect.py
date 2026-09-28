@@ -24,6 +24,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStream
 from dbl.checkpoint import apply_checkpoint, load_checkpoint
 from dbl.config import Config
 from dbl.moe import InferMoE, inject_moe
+from dbl.runtime import fail_cli, format_report, resolve_device
 
 log = logging.getLogger("dbl.chat")
 
@@ -100,7 +101,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--weights", default="dual_big_resurrect_weights.pt")
-    ap.add_argument("--device", default="cuda:0")
+    ap.add_argument("--device", default="auto",
+                    help="auto / cpu / cuda / cuda:N，默认自动探测")
     ap.add_argument("--max-new-tokens", type=int, default=600)
     ap.add_argument("--temperature", type=float, default=0.7)
     ap.add_argument("--top-p", type=float, default=0.9)
@@ -110,6 +112,13 @@ def main() -> None:
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    try:
+        args.device = resolve_device(args.device, allow_cpu=False)
+    except (RuntimeError, ValueError) as exc:
+        fail_cli(exc, "chat_dual_big_resurrect.py")
+        return
+    log.info("对话环境\n%s", format_report())
+
     model, tok, cfg, info = build_model(args.weights, args.device)
     modules = [layer.mlp for layer in model.model.layers]
     log.info("权重装载完成: %s", info)
