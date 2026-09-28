@@ -1,24 +1,3 @@
----
-license: apache-2.0
-language:
-  - en
-  - zh
-tags:
-  - moe
-  - mixture-of-experts
-  - lora
-  - mole
-  - pytorch
-  - llm-inference
-  - consumer-gpu
-  - edge-ai
-  - systems
-  - qwen
-  - hierarchical-moe
-pipeline_tag: text-generation
-library_name: pytorch
----
-
 # DualBigLittle-MoE: A Tri-Tier Hierarchical MoE Architecture with Dual Dense VRAM Cores & Streaming Micro-Expert Clusters
 
 [![GitHub](https://img.shields.io/badge/GitHub-DualBigLittle--MoE-181717?style=flat&logo=github&logoColor=white)](https://github.com/aifeifei798/DualBigLittle-MoE)
