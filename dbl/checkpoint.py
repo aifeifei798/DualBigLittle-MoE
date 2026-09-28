@@ -38,7 +38,8 @@ def _fingerprint(t: torch.Tensor) -> str:
 
     h = hashlib.sha256()
     h.update(str(tuple(t.shape)).encode())
-    h.update(t.detach().to(torch.float32).contiguous().numpy().tobytes())
+    flat = t.detach().to(device="cpu", dtype=torch.float32).contiguous()
+    h.update(flat.numpy().tobytes())
     return h.hexdigest()[:16]
 
 
@@ -48,8 +49,11 @@ def _delta_quantize(
     """per-channel int8 量化差分，返回 ``(量化值, scale)``。
 
     scale 按输出通道（最后一维）计算，保住每通道的幅度。
+    全程在 CPU 上做，避免训练时模块在 GPU 而参考权重在 CPU 造成设备错配。
     """
-    d = (trained.float() - base.float())
+    t = trained.detach().to("cpu", torch.float32)
+    b = base.detach().to("cpu", torch.float32)
+    d = t - b
     scale = d.abs().amax(dim=-1, keepdim=True) / 127.0
     scale = scale.clamp_min(1e-12)
     q = torch.round(d / scale).clamp_(-127, 127).to(torch.int8)
@@ -59,7 +63,8 @@ def _delta_quantize(
 def _delta_dequantize(
     q: torch.Tensor, scale: torch.Tensor, base: torch.Tensor
 ) -> torch.Tensor:
-    return (q.float() * scale + base.float()).to(base.dtype)
+    out = q.float() * scale + base.detach().to("cpu", torch.float32)
+    return out.to(base.dtype)
 
 
 def _reference_mlp(mod: DualBigLittleMoE):
@@ -110,11 +115,10 @@ def save_checkpoint(
                 scales[_module_key(i, f"big_sci.{k}")] = s
                 # 此时 trained 与 base 都在手，可直接测真实量化误差
                 restored = _delta_dequantize(q, s, base_t)
-                denom = float(v.detach().float().abs().max())
+                v_cpu = v.detach().to("cpu", torch.float32)
+                denom = float(v_cpu.abs().max())
                 if denom > 0:
-                    rel = float(
-                        (restored.float() - v.detach().float()).abs().max()
-                    ) / denom
+                    rel = float((restored.float() - v_cpu).abs().max()) / denom
                     max_quant_rel_err = max(max_quant_rel_err, rel)
             quantized += 1
         else:
@@ -161,6 +165,7 @@ def save_checkpoint(
         "size_mib": round(size_mib, 1),
         "delta_dtype": delta_dtype,
         "num_layers": len(modules),
+        "quant_rel_error": payload["meta"].get("quant_rel_error"),
     }
 
 

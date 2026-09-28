@@ -42,11 +42,17 @@ def set_seed(seed: int) -> None:
 
 @dataclass
 class StepMetrics:
-    loss: float
-    lm: float
-    big_router: float
-    little_router: float
-    load_balance: float
+    loss: torch.Tensor
+    lm: torch.Tensor
+    big_router: torch.Tensor
+    little_router: torch.Tensor
+    load_balance: torch.Tensor
+
+    def as_floats(self) -> dict[str, float]:
+        return {
+            k: float(getattr(self, k))
+            for k in ("loss", "lm", "big_router", "little_router", "load_balance")
+        }
 
 
 class MetricsWriter:
@@ -233,8 +239,10 @@ def train(
             scale = 1.0 / min(remainder, cfg.grad_accum_steps)
             (raw * scale).backward()
             running.append(
-                StepMetrics(float(raw), float(lm_loss), float(big_l),
-                            float(little_l), float(bal_l))
+                StepMetrics(
+                    raw.detach(), lm_loss.detach(), big_l.detach(),
+                    little_l.detach(), bal_l.detach(),
+                )
             )
             window_samples += batch["input_ids"].shape[0]
 
@@ -245,14 +253,16 @@ def train(
                 step += 1
 
                 if step % log_every == 0 or step == total_steps:
-                    m = running[-1]
-                    avg = sum(x.loss for x in running) / len(running)
+                    m = running[-1].as_floats()
+                    avg = sum(x.as_floats()["loss"] for x in running) / len(running)
                     now = time.time()
                     rec = {
-                        "step": step, "loss": round(avg, 4), "lm": round(m.lm, 4),
-                        "big_router": round(m.big_router, 4),
-                        "little_router": round(m.little_router, 4),
-                        "load_balance": round(m.load_balance, 4),
+                        "step": step,
+                        "loss": round(avg, 4),
+                        "lm": round(m["lm"], 4),
+                        "big_router": round(m["big_router"], 4),
+                        "little_router": round(m["little_router"], 4),
+                        "load_balance": round(m["load_balance"], 4),
                         "elapsed_s": round(now - t0, 1),
                         "samples_per_s": round(
                             window_samples / max(now - window_t0, 1e-6), 2
