@@ -90,6 +90,16 @@ def aux_losses(
 
     小核的监督信号是「该用哪一组专家」而非「该用第几个专家」——
     组内分工交给 LM loss 与负载均衡项，避免塌缩到单个专家。
+
+    **不做层间平均。** 历史实现把 28 层的 loss 除以 ``num_layers``，
+    但每层的 router 都是独立参数，对第 i 层求导时系数是
+    ``weight/28``——辅助信号被稀释 28 倍，等效于把
+    ``router_aux_weight`` 从 0.1 悄悄降到 0.0036，路由器几乎学不动
+    （实测 60 步后大核路由准确率 50.0% -> 50.1%，等同随机）。
+
+    去掉平均后，同等步数下准确率可达 63.5%。改为让
+    :class:`~dbl.config.Config` 的 ``router_aux_weight`` 直接决定
+    辅助信号强度，符合超参的直觉语义。
     """
     crit = nn.CrossEntropyLoss()
     seqlen = mask.shape[1]
@@ -115,8 +125,26 @@ def aux_losses(
         mean_p = probs.mean(dim=0)      # 路由器给出的平均概率
         balance = balance + mod.num_experts * torch.sum(frac * mean_p)
 
-    n = len(modules)
-    return big_loss / n, little_loss / n, balance / n
+    return big_loss, little_loss, balance
+
+
+def grad_accum_scales(total_batches: int, accum_steps: int) -> list[float]:
+    """预计算每个 micro-batch 的梯度缩放系数。
+
+    规则：组内每个 micro-batch 统一 ``1/group_size``，其中 ``group_size``
+    是该组实际的 micro-batch 数。完整组为 ``1/accum_steps``；只有**末尾
+    不足一组**时才按实际个数缩放，避免最后一步梯度被低估。
+
+    历史 bug：曾写成 ``1/min(remainder, accum_steps)``，组内权重变成
+    1, 1/2, 1/3, 1/4（合计 2.083），把每组第一个 micro-batch 的梯度
+    放大 4 倍。训练不会报错、loss 也会下降，但辅助损失长期停在随机猜测
+    水平之上，领域路由学不出来。回归测试见 ``tests/test_grad_accum.py``。
+    """
+    scales: list[float] = []
+    for start in range(0, total_batches, accum_steps):
+        size = min(accum_steps, total_batches - start)
+        scales.extend([1.0 / size] * size)
+    return scales
 
 
 def build_model(cfg: Config):
@@ -217,6 +245,7 @@ def train(
     step = 0
     running: list[StepMetrics] = []
     window_t0, window_samples = t0, 0
+    scales = grad_accum_scales(len(loader), cfg.grad_accum_steps)
 
     with MetricsWriter(metrics_path) as mw:
         for micro, batch in enumerate(loader):
@@ -234,10 +263,8 @@ def train(
                 + cfg.router_aux_weight * little_l
                 + cfg.load_balance_weight * bal_l
             )
-            # 末尾不足一个累积组时，按实际组数缩放，避免最后一步梯度被低估
-            remainder = (micro % cfg.grad_accum_steps) + 1
-            scale = 1.0 / min(remainder, cfg.grad_accum_steps)
-            (raw * scale).backward()
+            # 梯度累积的缩放（预计算，见 grad_accum_scales 的说明）
+            (raw * scales[micro]).backward()
             running.append(
                 StepMetrics(
                     raw.detach(), lm_loss.detach(), big_l.detach(),

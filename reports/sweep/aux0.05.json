@@ -1,0 +1,122 @@
+{
+  "meta": {
+    "base_model": "Qwen/Qwen3-0.6B",
+    "torch": "2.14.0+cu130",
+    "gpu": "NVIDIA GeForce RTX 5090 D",
+    "samples_per_domain": 100,
+    "split": "val",
+    "data_path": "dual_contrast_val.jsonl",
+    "holdout": true,
+    "group_bounds": [
+      [
+        0,
+        8
+      ],
+      [
+        8,
+        16
+      ],
+      [
+        16,
+        32
+      ]
+    ],
+    "checkpoint": {
+      "format": "dualbiglittle-moe",
+      "delta_dtype": null,
+      "quant_rel_error": null
+    }
+  },
+  "baseline": {
+    "ppl": {
+      "Code": 8.9007,
+      "Math": 7.9105,
+      "Arts": 7.3498
+    },
+    "ppl_tokens": {
+      "Code": 13963,
+      "Math": 17994,
+      "Arts": 9760
+    },
+    "samples_with_zero_loss": 0,
+    "sampled": 300
+  },
+  "dual_train": {
+    "ppl": {
+      "Code": 8.2237,
+      "Math": 7.659,
+      "Arts": 6.6695
+    },
+    "ppl_tokens": {
+      "Code": 13963,
+      "Math": 17994,
+      "Arts": 9760
+    },
+    "samples_with_zero_loss": 0,
+    "sampled": 300,
+    "expert_health": {
+      "experts_with_nonzero_weight": 895,
+      "experts_never_called": 1,
+      "total_experts": 896,
+      "per_layer_never_called": 0,
+      "min_pair_weight_share": 0.0
+    },
+    "routing_sci_share": [
+      0.4876,
+      0.5052,
+      0.5071,
+      0.4886,
+      0.519,
+      0.4958,
+      0.4939,
+      0.4904,
+      0.4949,
+      0.5016,
+      0.5108,
+      0.6089,
+      0.5098,
+      0.5951,
+      0.5428,
+      0.5455,
+      0.4703,
+      0.6398,
+      0.4958,
+      0.5935,
+      0.4749,
+      0.6016,
+      0.5575,
+      0.5668,
+      0.5929,
+      0.5686,
+      0.5263,
+      0.5515
+    ]
+  },
+  "jitter": {
+    "runs": 20,
+    "max_abs_diff": 0.0,
+    "bitwise_identical": true
+  },
+  "in_domain_routing": {
+    "0": {
+      "Code": 0.8126,
+      "Math": 0.7032,
+      "Arts": 0.2195
+    },
+    "8": {
+      "Code": 0.6461,
+      "Math": 0.7357,
+      "Arts": 0.2699
+    },
+    "16": {
+      "Code": 0.658,
+      "Math": 0.6807,
+      "Arts": 0.2495
+    },
+    "27": {
+      "Code": 0.8691,
+      "Math": 0.9191,
+      "Arts": 0.1639
+    }
+  }
+}

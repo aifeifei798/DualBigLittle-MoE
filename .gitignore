@@ -9,3 +9,6 @@ dual_big_resurrect_weights.pt
 checkpoints/
 reports/*.json
 reports/*.jsonl
+
+# 诊断脚本产生的中间 checkpoint
+checkpoints/sweep_*.pt

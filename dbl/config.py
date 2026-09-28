@@ -45,6 +45,14 @@ class Config:
     micro_batch: int = 4
     grad_accum_steps: int = 4
     max_length: int = 512
+    #: 辅助损失权重。直接决定对各层 router 的梯度强度，**不做层间平均**。
+    #:
+    #: 历史实现把各层 loss 除以 num_layers，但每层 router 都是独立参数，
+    #: 对第 i 层求导时系数是 weight/28 —— 辅助信号被稀释 28 倍，等效于
+    #: 把 0.1 悄悄降到 0.0036，路由器几乎学不动。
+    #:
+    #: 注意：调高该权重会让路由更"准"，但在本架构下**文科 PPL 会变差** ——
+    #: 详见 README §4 关于设计冲突的说明。默认 0.1 优先保证路由可用。
     router_aux_weight: float = 0.1
     load_balance_weight: float = 0.01
     lr_big_sci: float = 2e-5

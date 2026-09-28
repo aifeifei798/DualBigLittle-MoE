@@ -33,6 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--grad-accum", type=int, default=None)
     ap.add_argument("--max-length", type=int, default=None)
     ap.add_argument("--num-workers", type=int, default=None)
+    ap.add_argument("--router-aux-weight", type=float, default=None)
+    ap.add_argument("--load-balance-weight", type=float, default=None)
+    ap.add_argument("--lr-router", type=float, default=None)
     ap.add_argument("--log-every", type=int, default=25)
     ap.add_argument("--save-every", type=int, default=100)
     ap.add_argument("--delta-dtype", default=None, choices=[None, "int8"],
