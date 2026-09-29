@@ -450,10 +450,33 @@ python train_dual_big_resurrect.py --out checkpoints/demo_int8.pt --delta-dtype 
 python -m dbl.migrate_ckpt --src old_weights.pt --dst new.pt --delta-dtype int8
 ```
 
+### 导出为 Hugging Face 仓库
+
+```bash
+python export_to_hf.py            # 基座 + checkpoint -> ./hf_export
+python export_to_hf.py --pool-location device   # 跳过 PCIe 搬运
+```
+
+产物自带 `auto_map`，外部用户标准两行加载：
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+tok = AutoTokenizer.from_pretrained("./hf_export", trust_remote_code=True)
+model = AutoModelForCausalLM.from_pretrained("./hf_export", trust_remote_code=True)
+```
+
+`modeling_dualbig_moe.py` 只依赖 `torch` 与 `transformers`，**不 import 本仓库的
+`dbl`**——远程代码只会被拷进动态模块缓存，内部 import 必然断掉。注意力 / RoPE /
+KV cache 直接复用 transformers 的 Qwen3 实现（升级时只需核对三个 import），
+本仓库只替换每层 FFN 并实现 Tier-3 搬运。
+
+导出与原版推理管线的 logits **逐位相同**（`max|diff| = 0`，含 greedy 生成），
+回归测试见 `tests/test_hf_export.py`。
+
 ### 测试
 
 ```bash
-pytest                    # 83 项，约 1.5 秒，无需 GPU
+pytest                    # 142 项，约 3 秒（HF 导出的 8 项需 GPU）
 ruff check .
 ```
 
@@ -472,12 +495,16 @@ ruff check .
 | `dbl/train.py` | 训练循环（种子、logging、resume） |
 | `dbl/prepare.py` | 语料装配（清洗、去重、切分） |
 | `dbl/migrate_ckpt.py` | 旧格式 checkpoint 迁移 |
+| `configuration_dualbig_moe.py` | **HF 导出的配置类**（自包含全部骨架字段） |
+| `modeling_dualbig_moe.py` | **HF 导出的模型实现**（自包含，零 `dbl` 依赖） |
+| `export_to_hf.py` | **HF 仓库导出入口**（权重合并 + auto_map + 卡片） |
+| `example_usage.py` | 导出目录附带的上手示例 |
 | `prepare_dual_data.py` | 语料装配入口 |
 | `doctor.py` | **环境体检入口**（一条命令确认跑在 CUDA 上） |
 | `train_dual_big_resurrect.py` | 训练入口 |
 | `chat_dual_big_resurrect.py` | 交互对话入口 |
 | `eval_ppl.py` | **分域评估与可复现性体检** |
-| `tests/` | 134 项测试 |
+| `tests/` | 142 项测试 |
 
 ---
 

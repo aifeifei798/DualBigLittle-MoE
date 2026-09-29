@@ -15,3 +15,10 @@ checkpoints/sweep_*.pt
 
 # 一次性冒烟测试产物
 reports/smoke.json
+
+# HF 导出产物（权重由 export_to_hf.py 从 checkpoint + 基座生成，不入库）
+# 注意：`export_to_hf.py --out <dir>` 的目标目录名可以任意取，这里用通配
+# 兜住常见的两种命名，避免 1.7 GB 的 model.safetensors 误入 git。
+hf_export/
+dualbig-qwen3-0.6b/
+hf_export_*/
